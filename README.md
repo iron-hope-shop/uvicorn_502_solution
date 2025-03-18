@@ -1,57 +1,87 @@
-# Why does my FastAPI/Uvicorn application return 502 errors under load?
+# Uvicorn 502 Error Demo: File Descriptor Exhaustion
 
-**The Root Cause: File Descriptor Exhaustion**
+This repository demonstrates and explains how file descriptor exhaustion in FastAPI/Uvicorn applications can lead to 502 Bad Gateway errors when served behind Nginx.
 
-The 502 Bad Gateway errors you're experiencing with your FastAPI application under load are most likely caused by **file descriptor exhaustion**. This is a common issue when running Uvicorn (or other ASGI servers) behind a reverse proxy like Nginx.
+## Problem Overview
 
-I've created a complete proof-of-concept that demonstrates this issue and confirms that file descriptor exhaustion directly causes 502 errors.
+When a FastAPI application served by Uvicorn runs out of file descriptors, it can no longer accept new connections or open files. This situation manifests as 502 Bad Gateway errors when the application is behind Nginx or another reverse proxy, which can be confusing to diagnose.
 
-**What are File Descriptors?**
+## What are File Descriptors?
 
-File descriptors (FDs) are numeric identifiers for open files, sockets, and other I/O resources. Each connection to your application uses at least one file descriptor, and there's a limit to how many a process can have open simultaneously.
+File descriptors (FDs) are numeric identifiers for open files, sockets, and other I/O resources in UNIX-like systems. Each connection to your application uses at least one file descriptor, and there's a system-defined limit to how many a process can have open simultaneously.
 
-When your application runs out of available file descriptors:
-1. It can't accept new connections
-2. It may fail to open new files or sockets
-3. The reverse proxy (Nginx) can't establish a connection to your application
-4. Nginx returns a 502 Bad Gateway error to the client
+When an application exhausts its available file descriptors:
+1. It can't accept new network connections
+2. It can't open new files
+3. Any proxies (like Nginx) that attempt to connect receive connection failures
+4. These connection failures manifest as 502 Bad Gateway errors
 
-**How I Verified This Is the Cause**
+## Repository Contents
 
-I created a test environment with:
-- A FastAPI application that can intentionally leak file descriptors
-- Nginx as a reverse proxy
-- A test script that incrementally leaks FDs while making requests
+This repository provides a complete environment to demonstrate and debug this issue:
 
-The results clearly show that once file descriptor usage approaches the limit, Nginx starts returning 502 Bad Gateway errors.
+- `app.py`: FastAPI application with endpoints to:
+  - Show current file descriptor usage
+  - Create controlled file descriptor leaks
+  - Clean up leaked file descriptors
+- `middleware.py`: FastAPI middleware that prevents complete exhaustion by monitoring FD usage
+- `fd_monitor.py`: Utility functions for monitoring and reporting file descriptor usage
+- `simple_test.py`: Simple script to demonstrate 502 errors by incrementally leaking FDs
+- `test_fd_leak.py`: More detailed test script with better reporting
+- `nginx.conf`: Nginx configuration for proxying to the FastAPI app
+- `docker-compose.yml`: Docker setup with controlled FD limits for demonstration
+- `Dockerfile`: Application container with necessary dependencies
 
-Here's the relevant output from my test:
+## How to Run the Demo
 
-```
-[  1] ✅ OK (0.01s) - FDs: 12/50 (24%), Leaked: 3
-[  2] ✅ OK (0.01s) - FDs: 16/50 (32%), Leaked: 6
-...
-[ 13] ✅ OK (0.01s) - FDs: 49/50 (98%), Leaked: 39
-[ 14] ✅ OK (0.01s) - App error: HTTPConnectionPool(host='localhost', por...
-[ 15] ⛔ 502 BAD GATEWAY (0.12s) - FDs: 49/50 (98%), Leaked: 41
-...
-```
+### Prerequisites
 
-As you can see, once file descriptors approach 100% of the limit, 502 errors start occurring.
+- Docker and Docker Compose
 
-**Common Scenarios That Lead to File Descriptor Exhaustion**
+### Setup
 
-1. **Resource leaks**: Not properly closing files, connections, or sockets
-2. **High concurrent load**: Too many simultaneous connections
-3. **Low system limits**: Default file descriptor limits are too low
-4. **Long-lived connections**: WebSockets or other long-running connections
-5. **Database connection pools**: Improperly configured pools that open too many connections
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/iron-hope-shop/uvicorn_502_solution.git
+   cd uvicorn_502_solution
+   ```
 
-**How to Fix the Issue**
+2. Start the Docker containers:
+   ```bash
+   docker-compose up -d
+   ```
 
-**1. Increase File Descriptor Limits**
+3. Verify the application is running:
+   ```bash
+   curl http://localhost/
+   curl http://localhost:8000/
+   ```
 
-In production environments, increase the file descriptor limits:
+### Running the Tests
+
+1. Run the simple test script to demonstrate 502 errors:
+   ```bash
+   python3 simple_test.py
+   ```
+
+2. For more detailed testing:
+   ```bash
+   python3 test_fd_leak.py
+   ```
+
+## Understanding the Results
+
+When running the tests, you'll observe:
+1. Initially, all requests succeed
+2. As file descriptors are leaked, you'll start to see warnings in the logs
+3. Once the application approaches its file descriptor limit (50 in our demo), it will become unresponsive
+4. Nginx will start returning 502 Bad Gateway errors
+
+## How to Fix File Descriptor Exhaustion
+
+### 1. Increase File Descriptor Limits
+
+In production environments, configure higher limits:
 
 **For systemd services:**
 ```ini
@@ -78,68 +108,53 @@ your_user soft nofile 65535
 your_user hard nofile 65535
 ```
 
-**2. Implement Protective Middleware**
+### 2. Implement Protective Middleware
 
-Add middleware to monitor file descriptor usage and return controlled responses when approaching limits:
+This repository includes a `ResourceMonitorMiddleware` in `middleware.py` that:
+- Monitors file descriptor usage before processing each request
+- Returns a 503 Service Unavailable when approaching limits (95%)
+- Properly logs usage patterns for easier diagnosis
 
+To enable it, uncomment this line in `app.py`:
 ```python
-import resource
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
-
-class ResourceMonitorMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Get current FD count and limits
-        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-        fd_count = len(os.listdir('/proc/self/fd')) - 1  # Subtract 1 for the listing itself
-        
-        # If approaching limit, return 503
-        if fd_count > soft_limit * 0.95:
-            return Response(
-                content="Service temporarily unavailable due to high load",
-                status_code=503
-            )
-        
-        # Otherwise process normally
-        return await call_next(request)
-
-# Add to your FastAPI app
 app.add_middleware(ResourceMonitorMiddleware)
 ```
 
-**3. Fix Resource Leaks**
+### 3. Fix Resource Leaks
 
-Make sure you're properly closing all resources:
+Make sure your application properly closes all resources:
 
 ```python
-# Bad - resource leak
+# BAD - resource leak
 def bad_function():
     f = open("file.txt", "r")
     data = f.read()
-    return data  # File is never closed!
+    return data  # File never closed!
 
-# Good - using context manager
+# GOOD - using context manager
 def good_function():
     with open("file.txt", "r") as f:
         data = f.read()
-    return data  # File is automatically closed
+    return data  # File automatically closed
 ```
 
-**4. Configure Connection Pooling**
+### 4. Use Connection Pooling
 
 Properly configure connection pools for databases and external services:
 
 ```python
 from sqlalchemy import create_engine
-from databases import Database
 
 # Configure pool size appropriately
 DATABASE_URL = "postgresql://user:password@localhost/dbname"
-engine = create_engine(DATABASE_URL, pool_size=5, max_overflow=10)
-database = Database(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=5,        # Base number of connections to keep
+    max_overflow=10     # Maximum additional connections to create
+)
 ```
 
-**5. Set Appropriate Timeouts**
+### 5. Set Appropriate Timeouts
 
 Configure timeouts in both Uvicorn and Nginx:
 
@@ -150,63 +165,38 @@ uvicorn app:app --timeout-keep-alive 5
 
 **Nginx:**
 ```nginx
-http {
-    # Lower the keepalive timeout
-    keepalive_timeout 65;
-    
-    # Set shorter timeouts for the upstream
-    upstream app_server {
-        server app:8000;
-        keepalive 20;
-    }
-    
-    location / {
-        proxy_connect_timeout 5s;
-        proxy_read_timeout 10s;
-        proxy_send_timeout 10s;
-    }
-}
+# Lower the keepalive timeout
+keepalive_timeout 65;
+
+# Set shorter timeouts for the upstream
+proxy_connect_timeout 5s;
+proxy_read_timeout 10s;
+proxy_send_timeout 10s;
 ```
 
-**How to Monitor File Descriptor Usage**
+## Debugging File Descriptor Issues
 
-**In Production**
-
-Add monitoring for file descriptor usage:
-
-```python
-import psutil
-import logging
-
-def log_fd_usage():
-    process = psutil.Process()
-    fd_count = process.num_fds()
-    limits = resource.getrlimit(resource.RLIMIT_NOFILE)
-    
-    logging.info(f"FD usage: {fd_count}/{limits[0]} ({fd_count/limits[0]:.1%})")
-    
-    if fd_count > limits[0] * 0.8:
-        logging.warning("High file descriptor usage detected!")
-```
-
-**For Debugging**
-
-To check file descriptor usage:
+### Checking File Descriptor Usage
 
 ```bash
 # For a specific PID
 lsof -p <pid> | wc -l
 
-# Check limits
+# Check system limits
 ulimit -n
+
+# On Linux
+cat /proc/sys/fs/file-max
 ```
 
-**Conclusion**
+### Monitoring in Production
 
-502 Bad Gateway errors in FastAPI/Uvicorn applications are commonly caused by file descriptor exhaustion. By monitoring FD usage, increasing system limits, and implementing protective middleware, you can prevent these errors and maintain a stable application even under high load.
+Use the included `fd_monitor.py` utilities to add monitoring to your application.
 
-The key to resolving this issue is proper resource management and monitoring, ensuring that your application can gracefully handle load without exhausting system resources.
+## License
 
-----
+MIT
 
-**Code for the complete proof-of-concept is available in this repository**, including a FastAPI application, Nginx configuration, and test scripts to demonstrate and resolve the issue. 
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request. 
