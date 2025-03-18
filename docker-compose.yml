@@ -2,7 +2,7 @@ services:
   app:
     build:
       context: .
-    container_name: uvicorn_app
+    container_name: uvicorn_502_app
     environment:
       - PYTHONUNBUFFERED=1
     ports:
@@ -17,7 +17,7 @@ services:
 
   nginx:
     image: nginx:alpine
-    container_name: uvicorn_nginx
+    container_name: uvicorn_502_nginx
     ports:
       - "80:80"
     volumes:
