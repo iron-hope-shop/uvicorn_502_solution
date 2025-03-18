@@ -210,3 +210,100 @@ The key to resolving this issue is proper resource management and monitoring, en
 ----
 
 **Code for the complete proof-of-concept is available in this repository**, including a FastAPI application, Nginx configuration, and test scripts to demonstrate and resolve the issue. 
+
+## How to Run This Demonstration
+
+Follow these step-by-step instructions to replicate the file descriptor exhaustion issue and see how it causes 502 errors.
+
+### Prerequisites
+
+- Docker and Docker Compose
+- Python 3.8+
+
+### Setup and Execution
+
+1. **Clone this repository**:
+   ```bash
+   git clone https://github.com/yourusername/uvicorn_502_solution.git
+   cd uvicorn_502_solution
+   ```
+
+2. **Start the Docker containers**:
+   ```bash
+   docker-compose up -d
+   ```
+   This starts:
+   - A FastAPI application that can intentionally leak file descriptors
+   - Nginx as a reverse proxy in front of the application
+
+3. **Run the test script to demonstrate 502 errors**:
+   ```bash
+   python3 simple_test.py
+   ```
+   
+   This script:
+   - Makes requests to the application through Nginx
+   - Intentionally leaks file descriptors with each request
+   - Monitors when 502 errors start to occur
+
+   You should see output similar to:
+   ```
+   Simple FD Exhaustion Test
+   ========================
+   Leaking 3 file descriptor(s) per request
+   Press Ctrl+C to stop at any time
+
+   Initial FD count: 8/50
+
+   Making requests to Nginx (http://localhost)...
+   [  1] ✅ OK (0.01s) - FDs: 12/50 (24%), Leaked: 3
+   [  2] ✅ OK (0.01s) - FDs: 16/50 (32%), Leaked: 6
+   ...
+   [ 13] ✅ OK (0.01s) - FDs: 49/50 (98%), Leaked: 39
+   [ 14] ⛔ 502 BAD GATEWAY (0.12s) - FDs: 49/50 (98%), Leaked: 41
+   ...
+   ```
+
+4. **View the protective middleware implementation**:
+   
+   Check out `middleware.py` to see how to implement a safeguard against this issue:
+   ```bash
+   cat middleware.py
+   ```
+
+5. **Test with middleware enabled vs. disabled**:
+
+   To see the difference with protective middleware:
+   
+   a. With middleware disabled (will show 502 errors):
+   ```bash
+   # Edit app.py to comment out the middleware line
+   # Then restart the containers
+   docker-compose restart
+   python3 simple_test.py
+   ```
+   
+   b. With middleware enabled (will show 503 errors instead of 502):
+   ```bash
+   # Edit app.py to uncomment the middleware line
+   # Then restart the containers
+   docker-compose restart
+   python3 simple_test.py
+   ```
+
+6. **Clean up**:
+   ```bash
+   docker-compose down
+   ```
+
+### Modifying Test Parameters
+
+You can customize the demonstration by adjusting these values:
+
+- `FD_LEAK_COUNT` in `simple_test.py`: Controls how many file descriptors are leaked per request
+- `MAX_REQUESTS` in `simple_test.py`: Sets the maximum number of requests to perform
+- The threshold value in `middleware.py`: Determines when to return 503 responses
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. 
